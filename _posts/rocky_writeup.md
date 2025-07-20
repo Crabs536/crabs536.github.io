@@ -1,9 +1,9 @@
 ---
-title: "Write-up CTF: Rocky"
+title: "Write-up DUCTF: Rocky"
 categories: [CTF]
 tags: [DUCTF, reverse]
 ---
-# Write-up Challenge CTF: Rocky
+# Write-up DUCTF: Rocky
 
 ## Tóm tắt
 

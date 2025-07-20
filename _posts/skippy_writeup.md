@@ -1,7 +1,7 @@
 ---
 title: "Thám mã tấn công module chung"
-categories: [Notion]
-tags: [notion, module]
+categories: [CTF]
+tags: [DUCTF, reverse]
 ---
 # Write-up: Skippy.exe Reverse Engineering Challenge
 

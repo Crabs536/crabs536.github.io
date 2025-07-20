@@ -1,3 +1,8 @@
+---
+title: "Write-up CTF: Rocky"
+categories: [CTF]
+tags: [DUCTF, reverse]
+---
 # Write-up Challenge CTF: Rocky
 
 ## Tóm tắt

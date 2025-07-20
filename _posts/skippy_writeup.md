@@ -1,5 +1,5 @@
 ---
-title: "Thám mã tấn công module chung"
+title: "Write-up: Skippy.exe Reverse Engineering Challenge"
 categories: [CTF]
 tags: [DUCTF, reverse]
 ---

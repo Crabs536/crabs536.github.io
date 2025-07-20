@@ -1,3 +1,8 @@
+---
+title: "Thám mã tấn công module chung"
+categories: [Notion]
+tags: [notion, module]
+---
 # Write-up: Skippy.exe Reverse Engineering Challenge
 
 ## 1. Giới thiệu thử thách
@@ -46,74 +51,31 @@ Kiểm tra tệp `strings_skippy.txt` cho thấy các chuỗi đáng chú ý:
 *   "Uh oh... Skippy sees a null zone in the way..."
 *   Các hàm API Windows như `Sleep`, `VirtualProtect`, `VirtualQuery`, `GetLastError`, `SetUnhandledExceptionFilter`.
 
-### 2.2. Sử dụng Frida để gỡ lỗi động
+## 3. Phân tích mã nguồn (`skippy_src.txt`) và xác định cơ chế chống phân tích
 
-Chúng ta đã sử dụng Frida để móc các hàm API và quan sát hành vi của chương trình:
+Việc có tệp `skippy_src.txt` (được tạo từ IDA Pro) là cực kỳ hữu ích để hiểu sâu hơn về hành vi của chương trình. Phân tích mã nguồn đã tiết lộ:
 
-*   **Móc `Sleep`:** Ban đầu, chúng ta nghi ngờ `Sleep` gây ra độ trễ, nhưng việc bỏ qua nó không ngăn chương trình thoát.
-*   **Móc `GetLastError`:** Đầu ra của Frida cho thấy `GetLastError() returned: 87` nhiều lần. Mã lỗi 87 tương ứng với `ERROR_INVALID_PARAMETER`, cho thấy một hàm nào đó đang được gọi với các đối số không hợp lệ.
-*   **Móc `VirtualProtect` và `VirtualQuery`:** Các móc này không hiển thị đầu ra, cho thấy lỗi không trực tiếp đến từ các cuộc gọi này hoặc xảy ra trước khi chúng được gọi.
-*   **Móc `SetUnhandledExceptionFilter`:** Chúng ta phát hiện chương trình cài đặt một bộ lọc ngoại lệ tùy chỉnh tại địa chỉ `0x7ff73d3e33d0`.
-*   **Móc bộ lọc ngoại lệ tùy chỉnh:** Khi móc bộ lọc này, chúng ta thu được thông tin quan trọng:
-    *   `Exception Code: 0xc0000005` (STATUS_ACCESS_VIOLATION): Lỗi truy cập bộ nhớ.
-    *   `Exception Address: 0x7ff73d3e1570`: Địa chỉ chính xác nơi xảy ra lỗi.
+*   **Lỗi `ACCESS_VIOLATION`:** Mã nguồn xác nhận rằng lỗi `STATUS_ACCESS_VIOLATION` (0xc0000005) xảy ra tại địa chỉ `0x140001570` (tương ứng với `0x7ff73d3e1570` trong bộ nhớ runtime) trong hàm `stone`. Cụ thể, lệnh `mov [rax], dl` đang cố gắng ghi một byte vào địa chỉ của chuỗi "Oh no! Skippy is about to trip!", vốn là một chuỗi hằng được lưu trữ trong vùng bộ nhớ chỉ đọc. Việc cố gắng ghi vào vùng chỉ đọc này gây ra lỗi.
 
-## 3. Phân tích mã nguồn (`skippy_src.txt`)
+*   **Cơ chế "Sandwiched Functions":** Hàm `stone` được gọi hai lần bởi hàm `sandwich`:
 
-Việc có tệp `skippy_src.txt` (được tạo từ IDA Pro) là cực kỳ hữu ích. Chúng ta đã sử dụng nó để ánh xạ địa chỉ lỗi `0x7ff73d3e1570` trở lại mã nguồn.
+    ```assembly
+    sandwich        proc near
+    ; ...
+        call    stone
+    ; ...
+        call    decryptor
+    ; ...
+        call    stone
+    ; ...
+    sandwich        endp
+    ```
 
-Trong `skippy_src.txt`, địa chỉ `0x140001570` (tương ứng với `0x7ff73d3e1570` trong bộ nhớ runtime) nằm trong hàm `stone`:
+    Điều này xác nhận rằng `stone` là một cơ chế chống phân tích, được thiết kế để gây lỗi nếu chương trình không được thực thi trong môi trường mong muốn (ví dụ: không bị gỡ lỗi hoặc giả mạo). Việc chương trình thoát ngay lập tức sau khi in thông báo "Oh no! Skippy is about to trip!" là do cơ chế này.
 
-```assembly
-.text:0000000140001570                 mov     [rax], dl
-```
+## 4. Phân tích logic giải mã chính
 
-Lệnh này đang cố gắng ghi giá trị trong thanh ghi `DL` vào địa chỉ bộ nhớ được lưu trữ trong `RAX`. Phân tích ngữ cảnh cho thấy `RAX` chứa địa chỉ của chuỗi "Oh no! Skippy is about to trip!" (`aOhNoSkippyIsAb` trong mã nguồn), vốn là một chuỗi hằng được lưu trữ trong vùng bộ nhớ chỉ đọc. Việc cố gắng ghi vào vùng chỉ đọc này gây ra lỗi `ACCESS_VIOLATION`.
-
-Hàm `stone` được gọi hai lần bởi hàm `sandwich`:
-
-```assembly
-sandwich        proc near
-; ...
-    call    stone
-; ...
-    call    decryptor
-; ...
-    call    stone
-; ...
-sandwich        endp
-```
-
-Điều này xác nhận rằng `stone` là một cơ chế chống phân tích, được thiết kế để gây lỗi nếu chương trình không được thực thi trong môi trường mong muốn (ví dụ: không bị gỡ lỗi hoặc giả mạo).
-
-## 4. Bỏ qua cơ chế chống phân tích
-
-Để chương trình tiếp tục thực thi mà không gặp lỗi `ACCESS_VIOLATION`, chúng ta cần ngăn chặn việc thực thi mã trong hàm `stone`.
-
-Chúng ta đã thử `Memory.protect` để thay đổi quyền ghi của vùng bộ nhớ, nhưng lỗi vẫn xảy ra, cho thấy có thể có một cơ chế chống giả mạo khác phát hiện việc thay đổi quyền.
-
-Giải pháp hiệu quả nhất là sử dụng `Interceptor.replace()` của Frida để thay thế hoàn toàn hàm `stone` bằng một hàm trống rỗng. Điều này sẽ khiến chương trình bỏ qua logic gây lỗi của `stone` mà không gây ra bất kỳ ngoại lệ nào.
-
-Tập lệnh Frida đã cập nhật:
-
-```javascript
-// ... (các hook khác) ...
-
-// NEW HOOK: Replace the 'stone' function to bypass it entirely
-Interceptor.replace(ptr("0x7ff73d3e1507"), new NativeCallback(function () {
-    console.log("Replaced stone() function: Bypassing execution.");
-    // Hàm stone() gốc nhận một đối số (rcx). Chúng ta không cần sử dụng nó nếu chỉ trả về.
-    // Vì đây là một hàm void, chúng ta chỉ cần trả về.
-}, 'void', ['pointer'])); // 'void' return type, 'pointer' for the single argument (rcx)
-
-console.log("Frida script loaded: All hooks active.");
-```
-
-Khi chạy Frida với tập lệnh này, chương trình `skippy.exe` sẽ không còn gặp lỗi `ACCESS_VIOLATION` và sẽ tiếp tục thực thi.
-
-## 5. Phân tích logic giải mã
-
-Sau khi bỏ qua hàm `stone`, chúng ta tập trung vào hàm `decrypt_bytestring` được gọi trong `main`.
+Sau khi hiểu được nguyên nhân gây lỗi, chúng ta tập trung vào hàm `decrypt_bytestring` được gọi trong `main`, vì đây là nơi chứa logic giải mã thực sự.
 
 ```c
 decrypt_bytestring((__int64)&v7, (__int64)&v4);
@@ -123,10 +85,9 @@ Phân tích `skippy_src.txt` cho thấy `decrypt_bytestring` thực hiện các 
 1.  Gọi `AES_init_ctx_iv` với `&v7` (khối 1) làm khóa và `&v4` (khối 2) làm IV.
 2.  Sao chép dữ liệu được mã hóa từ một vị trí `precomputed` vào một bộ đệm.
 3.  Gọi `AES_CBC_decrypt_buffer` để giải mã dữ liệu.
-4.  Gọi hàm `stone` một lần nữa (điều này sẽ bị bỏ qua bởi móc Frida của chúng ta).
-5.  In ra dữ liệu đã giải mã bằng `puts`.
+4.  In ra dữ liệu đã giải mã bằng `puts`.
 
-### 5.1. Trích xuất Khóa, IV và Dữ liệu được mã hóa
+### 4.1. Trích xuất Khóa, IV và Dữ liệu được mã hóa
 
 Từ `main`:
 *   **Khóa gốc (Key):** Được tạo từ `v7` và `v8`.
@@ -165,13 +126,13 @@ Dữ liệu được mã hóa (`precomputed`) được tìm thấy trong `skippy
 Trích xuất 96 byte này cho chúng ta:
 `ae27241b7ffd2c8b3265f22ad1b063f0915b6b95dcc0eec14de2c563f7715594007d2bc75e5d614e5e51190f4ad1fd21c5c4b1ab89a4a725c5b8ed3cb37630727b2d2ab722dc9333264725c6b5ddb00dd3c3da6313f1e2f4df5180d5f3831843`
 
-### 5.2. Phép biến đổi Khóa và IV
+### 4.2. Phép biến đổi Khóa và IV
 
 Quan trọng nhất, hàm `decryptor` (được gọi bởi `sandwich`) thực hiện một phép biến đổi trên dữ liệu đầu vào của nó. Cụ thể, nó thực hiện phép toán `shr dl, 1` (dịch phải 1 bit, tương đương với chia cho 2) trên mỗi byte.
 
 Vì `sandwich` được gọi trên cả khóa và IV, chúng ta cần áp dụng phép biến đổi này cho cả hai trước khi sử dụng chúng để giải mã AES.
 
-## 6. Giải mã AES
+## 5. Giải mã AES và thu thập Flag
 
 Sử dụng thư viện `PyCryptodome` trong Python để thực hiện giải mã AES-128 CBC.
 
@@ -206,7 +167,7 @@ print(f"Decrypted data (bytes): {decrypted_data}")
 print(f"Decrypted data (UTF-8): {decrypted_data.decode('utf-8', errors='ignore')}")
 ```
 
-## 7. Kết quả
+## 6. Kết quả
 
 Chạy tập lệnh Python trên cho ra kết quả:
 
@@ -217,10 +178,9 @@ Và flag đã giải mã là:
 
 **`DUCTF{There_echoes_a_chorus_enending_and_wild_Laughter_and_gossip_unruly_and_piled}`**
 
-## 8. Bài học rút ra
+## 7. Bài học rút ra
 
-*   **Phân tích toàn diện:** Kết hợp phân tích tĩnh (mã nguồn, chuỗi) và phân tích động (Frida) là chìa khóa để hiểu hành vi của chương trình.
-*   **Nhận diện cơ chế chống phân tích:** Các lỗi `ACCESS_VIOLATION` hoặc các thông báo bất thường thường là dấu hiệu của các kỹ thuật chống gỡ lỗi hoặc chống giả mạo.
-*   **Hiểu rõ luồng dữ liệu:** Theo dõi cách dữ liệu được khởi tạo, biến đổi và sử dụng trong các hàm khác nhau là rất quan trọng, đặc biệt là trong các thuật toán mã hóa.
-*   **Đọc kỹ mã nguồn/dịch ngược:** Ngay cả một chi tiết nhỏ như phép toán `shr dl, 1` cũng có thể thay đổi hoàn toàn kết quả giải mã.
-*   **Sử dụng công cụ phù hợp:** Frida là một công cụ mạnh mẽ để đo lường động và bỏ qua các kiểm tra, trong khi các trình dịch ngược/gỡ lỗi là không thể thiếu để phân tích mã tĩnh.
+*   **Phân tích tĩnh là chìa khóa:** Việc có mã nguồn (hoặc đầu ra dịch ngược chất lượng cao) là cực kỳ quan trọng để hiểu sâu về logic chương trình, đặc biệt là các cơ chế chống phân tích và thuật toán mã hóa.
+*   **Nhận diện cơ chế chống phân tích:** Các lỗi `ACCESS_VIOLATION` hoặc các thông báo bất thường thường là dấu hiệu của các kỹ thuật chống gỡ lỗi hoặc chống giả mạo. Việc hiểu nguyên nhân gốc rễ của chúng (thông qua phân tích tĩnh) là quan trọng hơn việc cố gắng bỏ qua chúng một cách mù quáng.
+*   **Hiểu rõ luồng dữ liệu và biến đổi:** Theo dõi cách dữ liệu được khởi tạo, biến đổi và sử dụng trong các hàm khác nhau là rất quan trọng, đặc biệt là trong các thuật toán mã hóa. Một phép biến đổi nhỏ (như chia cho 2) có thể thay đổi hoàn toàn kết quả.
+*   **Sử dụng công cụ phù hợp:** Mặc dù các công cụ gỡ lỗi động như Frida có thể hữu ích để xác định các điểm lỗi và quan sát hành vi, nhưng đối với các thử thách phức tạp, phân tích tĩnh với các trình dịch ngược/dịch ngược (như IDA Pro hoặc Ghidra) thường cung cấp cái nhìn sâu sắc cần thiết để giải quyết vấn đề.
